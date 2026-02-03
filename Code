@@ -1,0 +1,288 @@
+# 1. Install necessary libraries (pip and apt-get for Chrome)
+print("Installing core Python libraries...")
+!pip install requests beautifulsoup4 pandas
+print("Installing Selenium and WebDriver Manager...")
+!pip install selenium webdriver_manager
+
+print("Adding Google Chrome repository and installing Google Chrome Stable...")
+# Suppress apt-key deprecation warning by adding -qq
+!wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
+!echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+!apt-get update -qq # Suppress output for update
+!apt-get install -y google-chrome-stable -qq # Suppress output for install
+print("Google Chrome Stable installed successfully.")
+
+# 2. Import necessary libraries
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+import json
+from urllib.parse import urljoin
+from google.colab import files
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from IPython.display import display # Explicitly import display for df.head()
+
+# 3. Define fetch_page_selenium function
+def fetch_page_selenium(driver, url):
+    """
+    Fetches the HTML content of a given URL using Selenium.
+    Navigates to the URL, waits for the page to render, and returns the HTML source.
+    Includes error handling for network issues and invalid URLs.
+    """
+    if not driver:
+        print("WebDriver is not initialized. Cannot fetch page.")
+        return None
+
+    try:
+        print(f"Navigating to: {url}")
+        driver.get(url)
+
+        # Wait for the body element to be present, indicating the page has loaded
+        # Increased wait time for potentially slow pages
+        WebDriverWait(driver, 60).until(
+            EC.presence_of_element_located((webdriver.common.by.By.TAG_NAME, "body"))
+        )
+
+        print("Page loaded successfully with Selenium.")
+        return driver.page_source
+
+    except TimeoutException:
+        print(f"Timeout error: Page took too long to load for {url}")
+        return None
+    except WebDriverException as e:
+        print(f"Selenium WebDriver error occurred for {url}: {e}")
+        return None
+    except Exception as e:
+        print(f"An unexpected error occurred while fetching page with Selenium for {url}: {e}")
+        return None
+
+# 4. Define parse_content function
+def parse_content(html_content, base_url):
+    """
+    Parses the HTML content and extracts various data elements.
+    Structures the data into a list of dictionaries for DataFrame conversion.
+    """
+    if not html_content:
+        return []
+
+    soup = BeautifulSoup(html_content, 'html.parser')
+    scraped_data = []
+
+    # 1. Page Title
+    title = soup.find('title')
+    if title:
+        scraped_data.append({
+            'type': 'title',
+            'tag': 'title',
+            'text': title.get_text(strip=True),
+            'url': None,
+            'alt': None,
+            'name_property': None,
+            'content_attribute': None,
+            'extra_data': None
+        })
+
+    # 2. Headings (h1-h6)
+    for i in range(1, 7):
+        for heading in soup.find_all(f'h{i}'):
+            text = heading.get_text(strip=True)
+            if text:
+                scraped_data.append({
+                    'type': 'heading',
+                    'tag': f'h{i}',
+                    'text': text,
+                    'url': None,
+                    'alt': None,
+                    'name_property': None,
+                    'content_attribute': None,
+                    'extra_data': None
+                })
+
+    # 3. Paragraph text
+    for p in soup.find_all('p'):
+        text = p.get_text(strip=True)
+        if text:
+            scraped_data.append({
+                'type': 'paragraph',
+                'tag': 'p',
+                'text': text,
+                'url': None,
+                'alt': None,
+                'name_property': None,
+                'content_attribute': None,
+                'extra_data': None
+            })
+
+    # 4. Tables
+    for i, table in enumerate(soup.find_all('table')):
+        table_data = []
+        headers = [th.get_text(strip=True) for th in table.find_all('th')]
+        rows = table.find_all('tr')
+
+        if headers: # If headers exist, assume first row is headers if not explicitly defined with <th>
+             table_data.append(headers)
+             start_row = 1 if len(table.find_all('th')) > 0 else 0 # Adjust if headers are in the first <tr>
+        else:
+             start_row = 0
+
+        for row in rows[start_row:]:
+            cols = [col.get_text(strip=True) for col in row.find_all(['td', 'th'])]
+            if cols: # Only add non-empty rows
+                table_data.append(cols)
+
+        if table_data:
+            scraped_data.append({
+                'type': 'table',
+                'tag': 'table',
+                'text': f'Table {i+1}', # A generic name, could try to find caption if exists
+                'url': None,
+                'alt': None,
+                'name_property': None,
+                'content_attribute': None,
+                'extra_data': json.dumps(table_data) # Store table as JSON string
+            })
+
+    # 5. Lists (ul/ol)
+    for list_tag in soup.find_all(['ul', 'ol']):
+        for li in list_tag.find_all('li'):
+            text = li.get_text(strip=True)
+            if text:
+                scraped_data.append({
+                    'type': 'list_item',
+                    'tag': 'li',
+                    'text': text,
+                    'url': None,
+                    'alt': None,
+                    'name_property': None,
+                    'content_attribute': None,
+                    'extra_data': None
+                })
+
+    # 6. Links (anchor text + URL)
+    for a in soup.find_all('a', href=True):
+        href = urljoin(base_url, a['href'])
+        text = a.get_text(strip=True)
+        if href and text:
+            scraped_data.append({
+                'type': 'link',
+                'tag': 'a',
+                'text': text,
+                'url': href,
+                'alt': None,
+                'name_property': None,
+                'content_attribute': None,
+                'extra_data': None
+            })
+
+    # 7. Images (image URL + alt text if available)
+    for img in soup.find_all('img', src=True):
+        src = urljoin(base_url, img['src'])
+        alt = img.get('alt', '').strip()
+        if src:
+            scraped_data.append({
+                'type': 'image',
+                'tag': 'img',
+                'text': None, # Images don't have 'text' content in this context
+                'url': src,
+                'alt': alt if alt else None,
+                'name_property': None,
+                'content_attribute': None,
+                'extra_data': None
+            })
+
+    # 8. Meta tags (name/property + content)
+    for meta in soup.find_all('meta'):
+        name_or_property = meta.get('name') or meta.get('property')
+        content = meta.get('content')
+        if name_or_property and content:
+            scraped_data.append({
+                'type': 'meta',
+                'tag': 'meta',
+                'text': None,
+                'url': None,
+                'alt': None,
+                'name_property': name_or_property,
+                'content_attribute': content,
+                'extra_data': None
+            })
+
+    return scraped_data
+
+# 5. Define save_data_to_csv function
+def save_data_to_csv(dataframe, filename='scraped_data.csv'):
+    """
+    Saves a Pandas DataFrame to a CSV file and provides a download link.
+    """
+    try:
+        dataframe.to_csv(filename, index=False, encoding='utf-8')
+        print(f"Data successfully saved to {filename}")
+        files.download(filename) # Provide download link in Colab
+    except Exception as e:
+        print(f"Error saving or downloading CSV: {e}")
+
+# 6. Selenium WebDriver Setup
+print("Setting up Selenium WebDriver...")
+chrome_options = Options()
+chrome_options.add_argument("--headless")
+chrome_options.add_argument("--no-sandbox")
+chrome_options.add_argument("--disable-dev-shm-usage")
+chrome_options.add_argument("--disable-gpu")
+chrome_options.add_argument("--disable-setuid-sandbox")
+chrome_options.add_argument("--remote-debugging-port=9222")
+chrome_options.add_argument("--window-size=1920,1080")
+chrome_options.binary_location = '/usr/bin/google-chrome'
+
+driver = None
+try:
+    driver_path = ChromeDriverManager().install()
+    service = Service(driver_path)
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    print("Selenium WebDriver initialized successfully.")
+except Exception as e:
+    print(f"Error during WebDriver setup: {e}")
+
+# 7. Main Execution Block
+if __name__ == '__main__':
+    # Get URL input from the user
+    target_url = input("Please enter the URL of the website to scrape (e.g., https://example.com): ")
+
+    if not target_url.strip():
+        print("URL cannot be empty. Exiting.")
+    elif not (target_url.startswith('http://') or target_url.startswith('https://')):
+        print("Invalid URL. Please provide a URL starting with 'http://' or 'https://'. Exiting.")
+    else:
+        print(f"Attempting to scrape: {target_url} using Selenium")
+
+        if driver: # Check if driver was successfully initialized
+            html_content = fetch_page_selenium(driver, target_url)
+
+            if html_content:
+                print("Page fetched successfully with Selenium. Parsing content...")
+                parsed_items = parse_content(html_content, target_url)
+
+                if parsed_items:
+                    # Convert the list of dictionaries to a Pandas DataFrame
+                    df = pd.DataFrame(parsed_items)
+                    print("Data parsed and structured into a DataFrame.")
+                    display(df.head())
+                    print(f"Total items scraped: {len(df)}")
+
+                    # Save the DataFrame to a CSV file and provide download link
+                    save_data_to_csv(df, filename='scraped_website_data_selenium.csv')
+                else:
+                    print("No relevant data found on the page or parsing failed.")
+            else:
+                print("Failed to fetch page content using Selenium. Please check the URL and your network connection.")
+
+            # Always quit the driver to free up resources
+            driver.quit()
+            print("WebDriver closed.")
+        else:
+            print("Selenium WebDriver was not initialized. Cannot proceed with scraping.")
